@@ -8,6 +8,9 @@
 class TextMessageModule : public SinglePortModule, public Observable<const meshtastic_MeshPacket *>
 {
   public:
+    static const uint8_t DS18B20_MAX_SENSORS = 8;
+    static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = 16;
+
     /** Constructor
      * name is for debugging output
      */
@@ -24,7 +27,7 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
 
   private:
     bool maybeHandleTemperatureCommand(const meshtastic_MeshPacket &mp);
-    char lastDs18b20List[8][17] = {};
+    char lastDs18b20List[DS18B20_MAX_SENSORS][DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
     uint8_t lastDs18b20ListCount = 0;
     uint32_t lastTemperatureCommandResponse = 0;
 };

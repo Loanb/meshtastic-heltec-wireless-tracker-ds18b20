@@ -43,10 +43,10 @@ index 71fb544a0..bb8684712 100644
      /** Attempt to cancel a previously sent packet from this _local_ node.  Returns true if a packet was found we could cancel */
      bool cancelSending(PacketId id);
 diff --git a/src/modules/TextMessageModule.cpp b/src/modules/TextMessageModule.cpp
-index aee359158..40d701152 100644
+index aee359158..623838201 100644
 --- a/src/modules/TextMessageModule.cpp
 +++ b/src/modules/TextMessageModule.cpp
-@@ -5,8 +5,220 @@
+@@ -5,8 +5,222 @@
  #include "buzz.h"
  #include "configuration.h"
  #include "graphics/Screen.h"
@@ -58,7 +58,9 @@ index aee359158..40d701152 100644
 +#include <Preferences.h>
 +#include <ctype.h>
 +#include <stdarg.h>
++#include <stdio.h>
 +#include <stdlib.h>
++#include <string.h>
 +#define HAS_DS18B20_TEXT_COMMAND
 +#endif
 +
@@ -66,8 +68,8 @@ index aee359158..40d701152 100644
  
 +#ifdef HAS_DS18B20_TEXT_COMMAND
 +static const uint8_t DS18B20_TEXT_COMMAND_PIN = 5;
-+static const uint8_t DS18B20_MAX_SENSORS = 8;
-+static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = 16;
++static const uint8_t DS18B20_MAX_SENSORS = TextMessageModule::DS18B20_MAX_SENSORS;
++static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = TextMessageModule::DS18B20_ADDRESS_HEX_LENGTH;
 +static const uint8_t DS18B20_NAME_LENGTH = 16;
 +static const uint32_t DS18B20_TEXT_COMMAND_THROTTLE_MS = 5 * 1000;
 +static const char DS18B20_NVS_NAMESPACE[] = "ds18b20";
@@ -267,7 +269,7 @@ index aee359158..40d701152 100644
  ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp)
  {
  #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
-@@ -24,6 +236,7 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
+@@ -24,6 +238,7 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
          powerFSM.trigger(EVENT_RECEIVED_MSG);
      }
      notifyObservers(&mp);
@@ -275,7 +277,7 @@ index aee359158..40d701152 100644
  
      return ProcessMessage::CONTINUE; // Let others look at this message also if they want
  }
-@@ -32,3 +245,175 @@ bool TextMessageModule::wantPacket(const meshtastic_MeshPacket *p)
+@@ -32,3 +247,175 @@ bool TextMessageModule::wantPacket(const meshtastic_MeshPacket *p)
  {
      return MeshService::isTextPayload(p);
  }
@@ -452,17 +454,27 @@ index aee359158..40d701152 100644
 +#endif
 +}
 diff --git a/src/modules/TextMessageModule.h b/src/modules/TextMessageModule.h
-index cc0b0f9d5..cd1c311d5 100644
+index cc0b0f9d5..b5ed75560 100644
 --- a/src/modules/TextMessageModule.h
 +++ b/src/modules/TextMessageModule.h
-@@ -21,6 +21,12 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
+@@ -8,6 +8,9 @@
+ class TextMessageModule : public SinglePortModule, public Observable<const meshtastic_MeshPacket *>
+ {
+   public:
++    static const uint8_t DS18B20_MAX_SENSORS = 8;
++    static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = 16;
++
+     /** Constructor
+      * name is for debugging output
+      */
+@@ -21,6 +24,12 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
      */
      virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
      virtual bool wantPacket(const meshtastic_MeshPacket *p) override;
 +
 +  private:
 +    bool maybeHandleTemperatureCommand(const meshtastic_MeshPacket &mp);
-+    char lastDs18b20List[8][17] = {};
++    char lastDs18b20List[DS18B20_MAX_SENSORS][DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
 +    uint8_t lastDs18b20ListCount = 0;
 +    uint32_t lastTemperatureCommandResponse = 0;
  };

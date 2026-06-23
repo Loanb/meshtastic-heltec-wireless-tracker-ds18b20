@@ -13,7 +13,9 @@
 #include <Preferences.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #define HAS_DS18B20_TEXT_COMMAND
 #endif
 
@@ -21,8 +23,8 @@ TextMessageModule *textMessageModule;
 
 #ifdef HAS_DS18B20_TEXT_COMMAND
 static const uint8_t DS18B20_TEXT_COMMAND_PIN = 5;
-static const uint8_t DS18B20_MAX_SENSORS = 8;
-static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = 16;
+static const uint8_t DS18B20_MAX_SENSORS = TextMessageModule::DS18B20_MAX_SENSORS;
+static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = TextMessageModule::DS18B20_ADDRESS_HEX_LENGTH;
 static const uint8_t DS18B20_NAME_LENGTH = 16;
 static const uint32_t DS18B20_TEXT_COMMAND_THROTTLE_MS = 5 * 1000;
 static const char DS18B20_NVS_NAMESPACE[] = "ds18b20";
