@@ -6,9 +6,14 @@
 #include "configuration.h"
 #include "graphics/Screen.h"
 
-#if defined(HELTEC_TRACKER_V1_1) && __has_include(<DallasTemperature.h>) && __has_include(<OneWire.h>)
+#if defined(HELTEC_TRACKER_V1_1) && __has_include(<DallasTemperature.h>) && __has_include(<OneWire.h>) && \
+    __has_include(<Preferences.h>)
 #include <DallasTemperature.h>
 #include <OneWire.h>
+#include <Preferences.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #define HAS_DS18B20_TEXT_COMMAND
 #endif
 
@@ -16,22 +21,201 @@ TextMessageModule *textMessageModule;
 
 #ifdef HAS_DS18B20_TEXT_COMMAND
 static const uint8_t DS18B20_TEXT_COMMAND_PIN = 5;
-static const uint32_t DS18B20_TEXT_COMMAND_THROTTLE_MS = 10 * 1000;
-static const char DS18B20_TEXT_COMMAND[] = "/temp";
+static const uint8_t DS18B20_MAX_SENSORS = 8;
+static const uint8_t DS18B20_ADDRESS_HEX_LENGTH = 16;
+static const uint8_t DS18B20_NAME_LENGTH = 16;
+static const uint32_t DS18B20_TEXT_COMMAND_THROTTLE_MS = 5 * 1000;
+static const char DS18B20_NVS_NAMESPACE[] = "ds18b20";
 
-static bool payloadContainsCommand(const meshtastic_Data &data, const char *command)
+struct Ds18b20Registration
 {
-    const size_t commandLength = strlen(command);
-    if (data.payload.size < commandLength) {
+    char address[DS18B20_ADDRESS_HEX_LENGTH + 1];
+    char name[DS18B20_NAME_LENGTH + 1];
+};
+
+static void appendResponse(char *response, const char *format, ...)
+{
+    size_t used = strlen(response);
+    if (used >= meshtastic_Constants_DATA_PAYLOAD_LEN - 1) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, format);
+    vsnprintf(response + used, meshtastic_Constants_DATA_PAYLOAD_LEN - used, format, args);
+    va_end(args);
+}
+
+static void bytesToHex(const uint8_t *bytes, char *hex)
+{
+    static const char chars[] = "0123456789ABCDEF";
+    for (uint8_t i = 0; i < 8; i++) {
+        hex[i * 2] = chars[bytes[i] >> 4];
+        hex[i * 2 + 1] = chars[bytes[i] & 0x0f];
+    }
+    hex[DS18B20_ADDRESS_HEX_LENGTH] = '\0';
+}
+
+static bool isHexAddress(const char *value)
+{
+    if (strlen(value) != DS18B20_ADDRESS_HEX_LENGTH) {
         return false;
     }
 
-    for (size_t i = 0; i <= data.payload.size - commandLength; i++) {
-        if (memcmp(data.payload.bytes + i, command, commandLength) == 0) {
-            return true;
+    for (uint8_t i = 0; i < DS18B20_ADDRESS_HEX_LENGTH; i++) {
+        if (!isxdigit((unsigned char)value[i])) {
+            return false;
         }
     }
-    return false;
+    return true;
+}
+
+static void normalizeHexAddress(const char *input, char *output)
+{
+    for (uint8_t i = 0; i < DS18B20_ADDRESS_HEX_LENGTH; i++) {
+        output[i] = toupper((unsigned char)input[i]);
+    }
+    output[DS18B20_ADDRESS_HEX_LENGTH] = '\0';
+}
+
+static bool isValidSensorName(const char *name)
+{
+    const size_t length = strlen(name);
+    if (length == 0 || length > DS18B20_NAME_LENGTH) {
+        return false;
+    }
+
+    for (size_t i = 0; i < length; i++) {
+        if (!isalnum((unsigned char)name[i]) && name[i] != '-' && name[i] != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint8_t scanDs18b20Bus(DallasTemperature &ds18b20, char addresses[][DS18B20_ADDRESS_HEX_LENGTH + 1], uint8_t maxSensors)
+{
+    ds18b20.begin();
+    ds18b20.setWaitForConversion(true);
+
+    const uint8_t count = min((uint8_t)ds18b20.getDeviceCount(), maxSensors);
+    DeviceAddress address;
+    for (uint8_t i = 0; i < count; i++) {
+        if (ds18b20.getAddress(address, i)) {
+            bytesToHex(address, addresses[i]);
+        } else {
+            addresses[i][0] = '\0';
+        }
+    }
+    return count;
+}
+
+static uint8_t loadRegistrations(Ds18b20Registration *registrations, uint8_t maxRegistrations)
+{
+    Preferences preferences;
+    preferences.begin(DS18B20_NVS_NAMESPACE, true);
+    const uint8_t count = min((uint8_t)preferences.getUChar("count", 0), maxRegistrations);
+    for (uint8_t i = 0; i < count; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "addr%u", i);
+        preferences.getString(key, registrations[i].address, sizeof(registrations[i].address));
+        snprintf(key, sizeof(key), "name%u", i);
+        preferences.getString(key, registrations[i].name, sizeof(registrations[i].name));
+    }
+    preferences.end();
+    return count;
+}
+
+static void saveRegistrations(const Ds18b20Registration *registrations, uint8_t count)
+{
+    Preferences preferences;
+    preferences.begin(DS18B20_NVS_NAMESPACE, false);
+    preferences.clear();
+    preferences.putUChar("count", count);
+    for (uint8_t i = 0; i < count; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "addr%u", i);
+        preferences.putString(key, registrations[i].address);
+        snprintf(key, sizeof(key), "name%u", i);
+        preferences.putString(key, registrations[i].name);
+    }
+    preferences.end();
+}
+
+static void clearRegistrations()
+{
+    Preferences preferences;
+    preferences.begin(DS18B20_NVS_NAMESPACE, false);
+    preferences.clear();
+    preferences.end();
+}
+
+static int findRegistrationByAddress(const Ds18b20Registration *registrations, uint8_t count, const char *address)
+{
+    for (uint8_t i = 0; i < count; i++) {
+        if (strcmp(registrations[i].address, address) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int findRegistrationByName(const Ds18b20Registration *registrations, uint8_t count, const char *name)
+{
+    for (uint8_t i = 0; i < count; i++) {
+        if (strcmp(registrations[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int findDetectedAddress(char addresses[][DS18B20_ADDRESS_HEX_LENGTH + 1], uint8_t count, const char *address)
+{
+    for (uint8_t i = 0; i < count; i++) {
+        if (strcmp(addresses[i], address) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool parseIndex(const char *value, uint8_t *index)
+{
+    if (!value || !value[0]) {
+        return false;
+    }
+    for (const char *p = value; *p; p++) {
+        if (!isdigit((unsigned char)*p)) {
+            return false;
+        }
+    }
+    const int parsed = atoi(value);
+    if (parsed < 1 || parsed > DS18B20_MAX_SENSORS) {
+        return false;
+    }
+    *index = parsed - 1;
+    return true;
+}
+
+static bool nextToken(char **cursor, char *token, size_t tokenSize)
+{
+    while (**cursor == ' ') {
+        (*cursor)++;
+    }
+    if (**cursor == '\0') {
+        return false;
+    }
+
+    size_t used = 0;
+    while (**cursor && **cursor != ' ') {
+        if (used + 1 < tokenSize) {
+            token[used++] = **cursor;
+        }
+        (*cursor)++;
+    }
+    token[used] = '\0';
+    return true;
 }
 #endif
 
@@ -69,7 +253,24 @@ bool TextMessageModule::maybeHandleTemperatureCommand(const meshtastic_MeshPacke
         return false;
     }
 
-    if (!payloadContainsCommand(mp.decoded, DS18B20_TEXT_COMMAND)) {
+    char payload[meshtastic_Constants_DATA_PAYLOAD_LEN + 1] = {};
+    uint8_t payloadSize = mp.decoded.payload.size;
+    if (payloadSize > meshtastic_Constants_DATA_PAYLOAD_LEN) {
+        payloadSize = meshtastic_Constants_DATA_PAYLOAD_LEN;
+    }
+    memcpy(payload, mp.decoded.payload.bytes, payloadSize);
+
+    char *cursor = payload;
+    char command[16] = {};
+    if (!nextToken(&cursor, command, sizeof(command))) {
+        return false;
+    }
+
+    const bool isListCommand = strcmp(command, "/list") == 0;
+    const bool isRegisterCommand = strcmp(command, "/register") == 0;
+    const bool isTempCommand = strcmp(command, "/temp") == 0;
+    const bool isClearMemoryCommand = strcmp(command, "/clear_memory") == 0;
+    if (!isListCommand && !isRegisterCommand && !isTempCommand && !isClearMemoryCommand) {
         return false;
     }
 
@@ -82,36 +283,120 @@ bool TextMessageModule::maybeHandleTemperatureCommand(const meshtastic_MeshPacke
 
     OneWire oneWire(DS18B20_TEXT_COMMAND_PIN);
     DallasTemperature ds18b20(&oneWire);
-    ds18b20.begin();
-    ds18b20.setWaitForConversion(true);
-
     char response[meshtastic_Constants_DATA_PAYLOAD_LEN] = {};
-    const uint8_t sensorCount = ds18b20.getDeviceCount();
-    if (sensorCount == 0) {
-        snprintf(response, sizeof(response), "DS18B20 not detected");
-    } else {
-        ds18b20.requestTemperatures();
-        size_t used = 0;
-        for (uint8_t i = 0; i < sensorCount && used < sizeof(response); i++) {
-            const float tempC = ds18b20.getTempCByIndex(i);
-            int written;
-            if (tempC == DEVICE_DISCONNECTED_C) {
-                if (sensorCount == 1) {
-                    written = snprintf(response + used, sizeof(response) - used, "Temperature: invalid");
-                } else {
-                    written = snprintf(response + used, sizeof(response) - used, "%sTemperature %u: invalid",
-                                       used ? "\n" : "", i + 1);
-                }
-            } else if (sensorCount == 1) {
-                written = snprintf(response + used, sizeof(response) - used, "Temperature: %.1f °C", (double)tempC);
+
+    if (isListCommand) {
+        lastDs18b20ListCount = scanDs18b20Bus(ds18b20, lastDs18b20List, DS18B20_MAX_SENSORS);
+        if (lastDs18b20ListCount == 0) {
+            snprintf(response, sizeof(response), "No DS18B20 sensors detected");
+        } else {
+            Ds18b20Registration registrations[DS18B20_MAX_SENSORS] = {};
+            const uint8_t registrationCount = loadRegistrations(registrations, DS18B20_MAX_SENSORS);
+            for (uint8_t i = 0; i < lastDs18b20ListCount; i++) {
+                const int registration = findRegistrationByAddress(registrations, registrationCount, lastDs18b20List[i]);
+                appendResponse(response, "%s%u) %s -> %s", i ? "\n" : "", i + 1, lastDs18b20List[i],
+                               registration >= 0 ? registrations[registration].name : "unassigned");
+            }
+        }
+    } else if (isRegisterCommand) {
+        char sensorId[DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
+        char name[DS18B20_NAME_LENGTH + 1] = {};
+        if (!nextToken(&cursor, sensorId, sizeof(sensorId)) || !nextToken(&cursor, name, sizeof(name))) {
+            snprintf(response, sizeof(response), "Usage: /register <index|address> <name>");
+        } else if (!isValidSensorName(name)) {
+            snprintf(response, sizeof(response), "Invalid name. Use up to 16 letters, numbers, '-' or '_'.");
+        } else {
+            char address[DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
+            uint8_t index;
+            if (parseIndex(sensorId, &index) && index < lastDs18b20ListCount && lastDs18b20List[index][0]) {
+                snprintf(address, sizeof(address), "%s", lastDs18b20List[index]);
+            } else if (isHexAddress(sensorId)) {
+                normalizeHexAddress(sensorId, address);
             } else {
-                written = snprintf(response + used, sizeof(response) - used, "%sTemperature %u: %.1f °C", used ? "\n" : "",
-                                   i + 1, (double)tempC);
+                snprintf(response, sizeof(response), "Unknown sensor. Use /list or full ROM address.");
             }
-            if (written < 0 || (size_t)written >= sizeof(response) - used) {
-                break;
+
+            if (address[0]) {
+                Ds18b20Registration registrations[DS18B20_MAX_SENSORS] = {};
+                uint8_t registrationCount = loadRegistrations(registrations, DS18B20_MAX_SENSORS);
+                int registration = findRegistrationByAddress(registrations, registrationCount, address);
+                if (registration < 0 && registrationCount >= DS18B20_MAX_SENSORS) {
+                    snprintf(response, sizeof(response), "Sensor memory full.");
+                } else {
+                    if (registration < 0) {
+                        registration = registrationCount++;
+                    }
+                    snprintf(registrations[registration].address, sizeof(registrations[registration].address), "%s", address);
+                    snprintf(registrations[registration].name, sizeof(registrations[registration].name), "%s", name);
+                    saveRegistrations(registrations, registrationCount);
+                    snprintf(response, sizeof(response), "Registered %s as %s.", address, name);
+                }
             }
-            used += written;
+        }
+    } else if (isClearMemoryCommand) {
+        clearRegistrations();
+        lastDs18b20ListCount = 0;
+        snprintf(response, sizeof(response), "Sensor memory cleared.\nUse /list then /register <index> <name>.");
+    } else if (isTempCommand) {
+        char sensorId[DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
+        const bool hasSensorId = nextToken(&cursor, sensorId, sizeof(sensorId));
+        char detected[DS18B20_MAX_SENSORS][DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
+        const uint8_t detectedCount = scanDs18b20Bus(ds18b20, detected, DS18B20_MAX_SENSORS);
+        Ds18b20Registration registrations[DS18B20_MAX_SENSORS] = {};
+        const uint8_t registrationCount = loadRegistrations(registrations, DS18B20_MAX_SENSORS);
+
+        if (!hasSensorId) {
+            if (registrationCount == 0) {
+                snprintf(response, sizeof(response), "No registered sensors.\nUse /list then /register <index> <name>.");
+            } else {
+                ds18b20.requestTemperatures();
+                for (uint8_t i = 0; i < registrationCount; i++) {
+                    const int detectedIndex = findDetectedAddress(detected, detectedCount, registrations[i].address);
+                    if (detectedIndex < 0) {
+                        appendResponse(response, "%s%s : not detected", i ? "\n" : "", registrations[i].name);
+                    } else {
+                        const float tempC = ds18b20.getTempCByIndex(detectedIndex);
+                        if (tempC == DEVICE_DISCONNECTED_C) {
+                            appendResponse(response, "%s%s : invalid", i ? "\n" : "", registrations[i].name);
+                        } else {
+                            appendResponse(response, "%s%s : %.1f °C", i ? "\n" : "", registrations[i].name, (double)tempC);
+                        }
+                    }
+                }
+            }
+        } else {
+            char address[DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
+            char label[DS18B20_ADDRESS_HEX_LENGTH + 1] = {};
+            uint8_t index;
+            if (parseIndex(sensorId, &index) && index < lastDs18b20ListCount && lastDs18b20List[index][0]) {
+                snprintf(address, sizeof(address), "%s", lastDs18b20List[index]);
+            } else if (isHexAddress(sensorId)) {
+                normalizeHexAddress(sensorId, address);
+            } else {
+                const int registration = findRegistrationByName(registrations, registrationCount, sensorId);
+                if (registration >= 0) {
+                    snprintf(address, sizeof(address), "%s", registrations[registration].address);
+                }
+            }
+
+            if (!address[0]) {
+                snprintf(response, sizeof(response), "Unknown sensor.");
+            } else {
+                const int registration = findRegistrationByAddress(registrations, registrationCount, address);
+                snprintf(label, sizeof(label), "%s", registration >= 0 ? registrations[registration].name : address);
+                const int detectedIndex = findDetectedAddress(detected, detectedCount, address);
+                if (detectedIndex < 0) {
+                    snprintf(response, sizeof(response), "%s : not detected", label);
+                } else {
+                    ds18b20.requestTemperatures();
+                    const float tempC = ds18b20.getTempCByIndex(detectedIndex);
+                    if (tempC == DEVICE_DISCONNECTED_C) {
+                        snprintf(response, sizeof(response), "%s : invalid", label);
+                    } else {
+                        snprintf(response, sizeof(response), "%s : %.1f °C", label, (double)tempC);
+                    }
+                }
+            }
         }
     }
 

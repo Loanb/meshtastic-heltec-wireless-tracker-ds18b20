@@ -24,6 +24,8 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
 
   private:
     bool maybeHandleTemperatureCommand(const meshtastic_MeshPacket &mp);
+    char lastDs18b20List[8][17] = {};
+    uint8_t lastDs18b20ListCount = 0;
     uint32_t lastTemperatureCommandResponse = 0;
 };
 
