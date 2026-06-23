@@ -21,6 +21,10 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
     */
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
     virtual bool wantPacket(const meshtastic_MeshPacket *p) override;
+
+  private:
+    bool maybeHandleTemperatureCommand(const meshtastic_MeshPacket &mp);
+    uint32_t lastTemperatureCommandResponse = 0;
 };
 
 extern TextMessageModule *textMessageModule;

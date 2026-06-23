@@ -164,6 +164,7 @@ SPIClass SPI1(HSPI);
 #endif
 
 using namespace concurrency;
+
 volatile static const char slipstreamTZString[] = {USERPREFS_TZ_STRING};
 
 // We always create a screen object, but we only init it if we find the hardware

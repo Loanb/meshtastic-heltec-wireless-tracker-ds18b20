@@ -1,0 +1,316 @@
+diff --git a/src/mesh/MeshService.cpp b/src/mesh/MeshService.cpp
+index 1b2af082d..4956f4dab 100644
+--- a/src/mesh/MeshService.cpp
++++ b/src/mesh/MeshService.cpp
+@@ -237,7 +237,7 @@ ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs,
+     return res ? ERRNO_OK : ERRNO_UNKNOWN;
+ }
+ 
+-void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone)
++void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone, bool queueStatusToPhone)
+ {
+     uint32_t mesh_packet_id = p->id;
+     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
+@@ -247,10 +247,12 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
+ 
+     /* NOTE(pboldin): Prepare and send QueueStatus message to the phone as a
+      * high-priority message. */
+-    meshtastic_QueueStatus qs = router->getQueueStatus();
+-    ErrorCode r = sendQueueStatusToPhone(qs, res, mesh_packet_id);
+-    if (r != ERRNO_OK) {
+-        LOG_DEBUG("Can't send status to phone");
++    if (queueStatusToPhone) {
++        meshtastic_QueueStatus qs = router->getQueueStatus();
++        ErrorCode r = sendQueueStatusToPhone(qs, res, mesh_packet_id);
++        if (r != ERRNO_OK) {
++            LOG_DEBUG("Can't send status to phone");
++        }
+     }
+ 
+     if ((res == ERRNO_OK || res == ERRNO_SHOULD_RELEASE) && ccToPhone) { // Check if p is not released in case it couldn't be sent
+diff --git a/src/mesh/MeshService.h b/src/mesh/MeshService.h
+index 71fb544a0..bb8684712 100644
+--- a/src/mesh/MeshService.h
++++ b/src/mesh/MeshService.h
+@@ -164,7 +164,8 @@ class MeshService
+     /// Send a packet into the mesh - note p must have been allocated from packetPool.  We will return it to that pool after
+     /// sending. This is the ONLY function you should use for sending messages into the mesh, because it also updates the nodedb
+     /// cache
+-    void sendToMesh(meshtastic_MeshPacket *p, RxSource src = RX_SRC_LOCAL, bool ccToPhone = false);
++    void sendToMesh(meshtastic_MeshPacket *p, RxSource src = RX_SRC_LOCAL, bool ccToPhone = false,
++                    bool queueStatusToPhone = true);
+ 
+     /** Attempt to cancel a previously sent packet from this _local_ node.  Returns true if a packet was found we could cancel */
+     bool cancelSending(PacketId id);
+diff --git a/src/modules/Telemetry/EnvironmentTelemetry.cpp b/src/modules/Telemetry/EnvironmentTelemetry.cpp
+index e8c8172cb..1f50af740 100644
+--- a/src/modules/Telemetry/EnvironmentTelemetry.cpp
++++ b/src/modules/Telemetry/EnvironmentTelemetry.cpp
+@@ -122,6 +122,12 @@ extern void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const c
+ #endif
+ 
+ #endif
++
++#if defined(HELTEC_TRACKER_V1_1) && __has_include(<DallasTemperature.h>) && __has_include(<OneWire.h>)
++#define HAS_DS18B20_SENSOR
++#include "Sensor/DS18B20Sensor.h"
++#endif
++
+ #ifdef T1000X_SENSOR_EN
+ #include "Sensor/T1000xSensor.h"
+ #endif
+@@ -191,6 +197,11 @@ void EnvironmentTelemetryModule::i2cScanFinished(ScanI2C *i2cScanner)
+ #endif
+ #endif
+ 
++#ifdef HAS_DS18B20_SENSOR
++    // Not a real I2C device, uses OneWire on GPIO 5
++    addSensor<DS18B20Sensor>(i2cScanner, ScanI2C::DeviceType::NONE);
++#endif
++
+ #if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR_EXTERNAL
+ #if __has_include(<DFRobot_LarkWeatherStation.h>)
+     addSensor<DFRobotLarkSensor>(i2cScanner, ScanI2C::DeviceType::DFROBOT_LARK);
+diff --git a/src/modules/Telemetry/Sensor/DS18B20Sensor.cpp b/src/modules/Telemetry/Sensor/DS18B20Sensor.cpp
+new file mode 100644
+index 000000000..14e352ddd
+--- /dev/null
++++ b/src/modules/Telemetry/Sensor/DS18B20Sensor.cpp
+@@ -0,0 +1,54 @@
++#include "configuration.h"
++
++#if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR && defined(HELTEC_TRACKER_V1_1) && __has_include(<DallasTemperature.h>) && \
++    __has_include(<OneWire.h>)
++
++#include "../mesh/generated/meshtastic/telemetry.pb.h"
++#include "DS18B20Sensor.h"
++#include "TelemetrySensor.h"
++
++DS18B20Sensor::DS18B20Sensor()
++    : TelemetrySensor(meshtastic_TelemetrySensorType_SENSOR_UNSET, "DS18B20"), oneWire(DS18B20_PIN), ds18b20(&oneWire)
++{
++}
++
++bool DS18B20Sensor::initDevice(TwoWire *bus, ScanI2C::FoundDevice *dev)
++{
++    LOG_INFO("Init sensor: %s on GPIO %d", sensorName, DS18B20_PIN);
++
++    ds18b20.begin();
++    ds18b20.setWaitForConversion(true);
++
++    if (ds18b20.getDeviceCount() < 1) {
++        LOG_WARN("DS18B20 not detected on GPIO %d", DS18B20_PIN);
++        status = 0;
++        initialized = true;
++        return false;
++    }
++
++    status = 1;
++    initialized = true;
++    ds18b20.requestTemperatures();
++    LOG_INFO("DS18B20 initialized on GPIO %d", DS18B20_PIN);
++    return true;
++}
++
++bool DS18B20Sensor::getMetrics(meshtastic_Telemetry *measurement)
++{
++    measurement->which_variant = meshtastic_Telemetry_environment_metrics_tag;
++
++    ds18b20.requestTemperatures();
++    float tempC = ds18b20.getTempCByIndex(0);
++
++    if (tempC == DEVICE_DISCONNECTED_C) {
++        LOG_WARN("DS18B20 invalid temperature read on GPIO %d", DS18B20_PIN);
++        return false;
++    }
++
++    measurement->variant.environment_metrics.has_temperature = true;
++    measurement->variant.environment_metrics.temperature = tempC;
++    LOG_INFO("DS18B20 temperature: %.2f C", tempC);
++    return true;
++}
++
++#endif
+diff --git a/src/modules/Telemetry/Sensor/DS18B20Sensor.h b/src/modules/Telemetry/Sensor/DS18B20Sensor.h
+new file mode 100644
+index 000000000..9ee2e383a
+--- /dev/null
++++ b/src/modules/Telemetry/Sensor/DS18B20Sensor.h
+@@ -0,0 +1,26 @@
++#include "configuration.h"
++
++#if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR && defined(HELTEC_TRACKER_V1_1) && __has_include(<DallasTemperature.h>) && \
++    __has_include(<OneWire.h>)
++
++#pragma once
++
++#include "../mesh/generated/meshtastic/telemetry.pb.h"
++#include "TelemetrySensor.h"
++#include <DallasTemperature.h>
++#include <OneWire.h>
++
++class DS18B20Sensor : public TelemetrySensor
++{
++  private:
++    static const uint8_t DS18B20_PIN = 5;
++    OneWire oneWire;
++    DallasTemperature ds18b20;
++
++  public:
++    DS18B20Sensor();
++    virtual bool getMetrics(meshtastic_Telemetry *measurement) override;
++    virtual bool initDevice(TwoWire *bus, ScanI2C::FoundDevice *dev) override;
++};
++
++#endif
+diff --git a/src/modules/TextMessageModule.cpp b/src/modules/TextMessageModule.cpp
+index aee359158..55c332a00 100644
+--- a/src/modules/TextMessageModule.cpp
++++ b/src/modules/TextMessageModule.cpp
+@@ -5,8 +5,36 @@
+ #include "buzz.h"
+ #include "configuration.h"
+ #include "graphics/Screen.h"
++
++#if defined(HELTEC_TRACKER_V1_1) && __has_include(<DallasTemperature.h>) && __has_include(<OneWire.h>)
++#include <DallasTemperature.h>
++#include <OneWire.h>
++#define HAS_DS18B20_TEXT_COMMAND
++#endif
++
+ TextMessageModule *textMessageModule;
+ 
++#ifdef HAS_DS18B20_TEXT_COMMAND
++static const uint8_t DS18B20_TEXT_COMMAND_PIN = 5;
++static const uint32_t DS18B20_TEXT_COMMAND_THROTTLE_MS = 10 * 1000;
++static const char DS18B20_TEXT_COMMAND[] = "/temp";
++
++static bool payloadContainsCommand(const meshtastic_Data &data, const char *command)
++{
++    const size_t commandLength = strlen(command);
++    if (data.payload.size < commandLength) {
++        return false;
++    }
++
++    for (size_t i = 0; i <= data.payload.size - commandLength; i++) {
++        if (memcmp(data.payload.bytes + i, command, commandLength) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++#endif
++
+ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp)
+ {
+ #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
+@@ -24,6 +52,7 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
+         powerFSM.trigger(EVENT_RECEIVED_MSG);
+     }
+     notifyObservers(&mp);
++    maybeHandleTemperatureCommand(mp);
+ 
+     return ProcessMessage::CONTINUE; // Let others look at this message also if they want
+ }
+@@ -32,3 +61,74 @@ bool TextMessageModule::wantPacket(const meshtastic_MeshPacket *p)
+ {
+     return MeshService::isTextPayload(p);
+ }
++
++bool TextMessageModule::maybeHandleTemperatureCommand(const meshtastic_MeshPacket &mp)
++{
++#ifdef HAS_DS18B20_TEXT_COMMAND
++    if (mp.decoded.portnum != meshtastic_PortNum_TEXT_MESSAGE_APP) {
++        return false;
++    }
++
++    if (!payloadContainsCommand(mp.decoded, DS18B20_TEXT_COMMAND)) {
++        return false;
++    }
++
++    const uint32_t now = millis();
++    if (lastTemperatureCommandResponse != 0 &&
++        now - lastTemperatureCommandResponse < DS18B20_TEXT_COMMAND_THROTTLE_MS) {
++        LOG_WARN("Ignore DS18B20 temperature command due to throttling");
++        return true;
++    }
++
++    OneWire oneWire(DS18B20_TEXT_COMMAND_PIN);
++    DallasTemperature ds18b20(&oneWire);
++    ds18b20.begin();
++    ds18b20.setWaitForConversion(true);
++
++    char response[meshtastic_Constants_DATA_PAYLOAD_LEN] = {};
++    const uint8_t sensorCount = ds18b20.getDeviceCount();
++    if (sensorCount == 0) {
++        snprintf(response, sizeof(response), "DS18B20 not detected");
++    } else {
++        ds18b20.requestTemperatures();
++        size_t used = 0;
++        for (uint8_t i = 0; i < sensorCount && used < sizeof(response); i++) {
++            const float tempC = ds18b20.getTempCByIndex(i);
++            int written;
++            if (tempC == DEVICE_DISCONNECTED_C) {
++                if (sensorCount == 1) {
++                    written = snprintf(response + used, sizeof(response) - used, "Temperature: invalid");
++                } else {
++                    written = snprintf(response + used, sizeof(response) - used, "%sTemperature %u: invalid",
++                                       used ? "\n" : "", i + 1);
++                }
++            } else if (sensorCount == 1) {
++                written = snprintf(response + used, sizeof(response) - used, "Temperature: %.1f °C", (double)tempC);
++            } else {
++                written = snprintf(response + used, sizeof(response) - used, "%sTemperature %u: %.1f °C", used ? "\n" : "",
++                                   i + 1, (double)tempC);
++            }
++            if (written < 0 || (size_t)written >= sizeof(response) - used) {
++                break;
++            }
++            used += written;
++        }
++    }
++
++    meshtastic_MeshPacket *p = allocDataPacket();
++    p->to = isBroadcast(mp.to) ? NODENUM_BROADCAST : getFrom(&mp);
++    p->channel = mp.channel;
++    p->priority = meshtastic_MeshPacket_Priority_BACKGROUND;
++    p->want_ack = false;
++    p->decoded.want_response = false;
++    p->decoded.payload.size = strlen(response);
++    memcpy(p->decoded.payload.bytes, response, p->decoded.payload.size);
++
++    LOG_INFO("Send DS18B20 temperature command response: %s", response);
++    service->sendToMesh(p, RX_SRC_LOCAL, false, false);
++    lastTemperatureCommandResponse = now;
++    return true;
++#else
++    return false;
++#endif
++}
+diff --git a/src/modules/TextMessageModule.h b/src/modules/TextMessageModule.h
+index cc0b0f9d5..e2f5aaf75 100644
+--- a/src/modules/TextMessageModule.h
++++ b/src/modules/TextMessageModule.h
+@@ -21,6 +21,10 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
+     */
+     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
+     virtual bool wantPacket(const meshtastic_MeshPacket *p) override;
++
++  private:
++    bool maybeHandleTemperatureCommand(const meshtastic_MeshPacket &mp);
++    uint32_t lastTemperatureCommandResponse = 0;
+ };
+ 
+-extern TextMessageModule *textMessageModule;
+\ No newline at end of file
++extern TextMessageModule *textMessageModule;
+diff --git a/variants/esp32s3/heltec_wireless_tracker/platformio.ini b/variants/esp32s3/heltec_wireless_tracker/platformio.ini
+index 3a373bf4f..1947c89ff 100644
+--- a/variants/esp32s3/heltec_wireless_tracker/platformio.ini
++++ b/variants/esp32s3/heltec_wireless_tracker/platformio.ini
+@@ -13,3 +13,5 @@ build_flags =
+ lib_deps =
+   ${esp32s3_base.lib_deps}
+   lovyan03/LovyanGFX@^1.2.0
++  paulstoffregen/OneWire@^2.3.8
++  milesburton/DallasTemperature@^4.0.4

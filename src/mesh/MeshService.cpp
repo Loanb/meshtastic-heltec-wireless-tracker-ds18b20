@@ -237,7 +237,7 @@ ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs, 
     return res ? ERRNO_OK : ERRNO_UNKNOWN;
 }
 
-void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone)
+void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone, bool queueStatusToPhone)
 {
     uint32_t mesh_packet_id = p->id;
     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
@@ -247,10 +247,12 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
 
     /* NOTE(pboldin): Prepare and send QueueStatus message to the phone as a
      * high-priority message. */
-    meshtastic_QueueStatus qs = router->getQueueStatus();
-    ErrorCode r = sendQueueStatusToPhone(qs, res, mesh_packet_id);
-    if (r != ERRNO_OK) {
-        LOG_DEBUG("Can't send status to phone");
+    if (queueStatusToPhone) {
+        meshtastic_QueueStatus qs = router->getQueueStatus();
+        ErrorCode r = sendQueueStatusToPhone(qs, res, mesh_packet_id);
+        if (r != ERRNO_OK) {
+            LOG_DEBUG("Can't send status to phone");
+        }
     }
 
     if ((res == ERRNO_OK || res == ERRNO_SHOULD_RELEASE) && ccToPhone) { // Check if p is not released in case it couldn't be sent
