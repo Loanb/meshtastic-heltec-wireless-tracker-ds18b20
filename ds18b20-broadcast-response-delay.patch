@@ -1,0 +1,15 @@
+diff --git a/src/modules/TextMessageModule.cpp b/src/modules/TextMessageModule.cpp
+index 623838201..e168e79c3 100644
+--- a/src/modules/TextMessageModule.cpp
++++ b/src/modules/TextMessageModule.cpp
+@@ -402,6 +402,10 @@ bool TextMessageModule::maybeHandleTemperatureCommand(const meshtastic_MeshPacke
+         }
+     }
+ 
++    if (isTempCommand && isBroadcast(mp.to)) {
++        delay((nodeDB->getNodeNum() % 10) * 1000);
++    }
++
+     meshtastic_MeshPacket *p = allocDataPacket();
+     p->to = isBroadcast(mp.to) ? NODENUM_BROADCAST : getFrom(&mp);
+     p->channel = mp.channel;
