@@ -56,7 +56,7 @@ git clone https://github.com/meshtastic/firmware.git
 cd firmware
 git checkout v2.7.15.567b8ea
 git submodule update --init --recursive
-cp /path/to/ds18b20-multi-sensor-text-commands.patch .
+wget https://raw.githubusercontent.com/Loanb/meshtastic-heltec-wireless-tracker-ds18b20/ds18b20-working/ds18b20-multi-sensor-text-commands.patch
 git apply ds18b20-multi-sensor-text-commands.patch
 ```
 
